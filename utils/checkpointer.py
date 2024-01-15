@@ -43,7 +43,14 @@ class Checkpointer(object):
                 checkpoint = torch.load(f, map_location=torch.device("cpu"))
 
                 if "model" in checkpoint and self.model:
-                    self.model.load_state_dict(checkpoint.pop("model"))
+                    model_dict = self.model.state_dict()
+                    # 1. filter out unnecessary keys
+                    pretrained_dict = {k: v for k, v in checkpoint.pop("model").items() if k in model_dict}
+                    # 2. overwrite entries in the existing state dict
+                    model_dict.update(pretrained_dict)
+                    # 3. load the new state dict
+                    self.model.load_state_dict(pretrained_dict, strict=False)
+                    # self.model.load_state_dict(checkpoint.pop("model"), strict=False)
                 if model_only:
                     checkpoint.pop("optimizer", None)
                     checkpoint.pop("scheduler", None)
@@ -51,8 +58,10 @@ class Checkpointer(object):
 
                 if "optimizer" in checkpoint and self.optimizer:
                     self.logger.info("Loading optimizer from {}".format(f))
-                    self.optimizer.load_state_dict(checkpoint.pop("optimizer"))
-
+                    try:
+                        self.optimizer.load_state_dict(checkpoint.pop("optimizer"))
+                    except ValueError:
+                        print('Failed to load optimizer due to param difference')
                 if "scheduler" in checkpoint and self.scheduler:
                     self.logger.info("Loading scheduler from {}".format(f))
                     self.scheduler.load_state_dict(checkpoint.pop("scheduler"))

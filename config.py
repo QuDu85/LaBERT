@@ -6,11 +6,11 @@ _C.distributed = True
 _C.log_time = 20
 _C.checkpoint_time = 2500
 _C.save_dir = 'output'
-_C.data_dir = 'data'
+_C.data_dir = 'E:\\Download\\Data\\COCO'
 _C.num_workers = 3
 _C.boundaries = ((7, 9), (10, 14), (15, 19), (20, 25))
 _C.samples_per_gpu = 36  # 64 for inference
-_C.model_path = ''
+_C.model_path = 'D:\\Work\\Dissertation\\Model\\model_0075000.pth'
 _C.pretrained_bert = 'pretrained/bert.pth'
 
 _C.solver = CN()
@@ -29,4 +29,4 @@ _C.loss.label_smoothing = 0.1
 
 _C.infer = CN()
 _C.infer.steps = (10, 15, 20, 20)
-_C.infer.eos_decay = (1.0, 0.88, 0.95, 1.0)
+_C.infer.eos_decay = (1.0, 0.88, 0.2, 0.1)

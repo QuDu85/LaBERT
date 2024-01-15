@@ -1,7 +1,6 @@
 import torch
 from torch import nn
-from transformers import modeling_bert
-
+from transformers.models.bert import modeling_bert
 
 class VLBertEmbeddings(modeling_bert.BertEmbeddings):
     def __init__(self, config):
@@ -13,22 +12,41 @@ class VLBertEmbeddings(modeling_bert.BertEmbeddings):
             nn.Linear(2048, config.hidden_size),
             nn.Dropout(config.hidden_dropout_prob))
 
-        self.region_position_embed = nn.Sequential(
-            nn.Linear(6 + 1601, config.hidden_size),
-            nn.ReLU(inplace=True),
-            nn.Dropout(config.hidden_dropout_prob))
+        # self.region_position_embed = nn.Sequential(
+        #     nn.Linear(6 + 1601, config.hidden_size),
+        #     nn.ReLU(inplace=True),
+        #     nn.Dropout(config.hidden_dropout_prob))
 
-    def forward(self, region_features, position_features,
+    # def forward(self, region_features, position_features,
+    #             input_token_ids, token_type_ids, position_ids):
+    #     region_features = self.region_embed(region_features)
+    #     position_features = self.region_position_embed(position_features)
+    #
+    #     words_embeddings = self.word_embeddings(input_token_ids)
+    #     position_embeddings = self.position_embeddings(position_ids)
+    #     token_type_embeddings = self.token_type_embeddings(token_type_ids)
+    #
+    #     words_embeddings = torch.cat((region_features, words_embeddings), dim=1)
+    #     position_embeddings = torch.cat((position_features, position_embeddings), dim=1)
+    #
+    #     embeddings = words_embeddings + position_embeddings + token_type_embeddings
+    #     return self.dropout(self.LayerNorm(embeddings))
+
+    def forward(self, region_features,
                 input_token_ids, token_type_ids, position_ids):
         region_features = self.region_embed(region_features)
-        position_features = self.region_position_embed(position_features)
 
         words_embeddings = self.word_embeddings(input_token_ids)
         position_embeddings = self.position_embeddings(position_ids)
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
         words_embeddings = torch.cat((region_features, words_embeddings), dim=1)
-        position_embeddings = torch.cat((position_features, position_embeddings), dim=1)
+        position_embeddings = torch.cat((torch.zeros(region_features.shape, dtype=torch.float32, device='cuda'), \
+                                        position_embeddings), dim=1)
+        # print(f' region feature shape: {region_features.shape}')
+        # print(f' word embedding shape: {words_embeddings.shape}')
+        # print(f' position embedding shape: {position_embeddings.shape}')
+        # print(f' token type embedding shape: {token_type_embeddings.shape}')
 
         embeddings = words_embeddings + position_embeddings + token_type_embeddings
         return self.dropout(self.LayerNorm(embeddings))
@@ -47,16 +65,35 @@ class Generator(modeling_bert.BertPreTrainedModel):
 
     def load_weights(self, path):
         state_dict = torch.load(path, map_location=torch.device("cpu"))
+        model_dict = self.state_dict()
         if 'model' in state_dict.keys():
             state_dict = state_dict['model']
-        self.load_state_dict(state_dict, strict=False)
+        # 1. filter out unnecessary keys
+        pretrained_dict = {k: v for k, v in state_dict.items() if k in model_dict}
+        # 2. overwrite entries in the existing state dict
+        model_dict.update(pretrained_dict)
+        # 3. load the new state dict
+        self.load_state_dict(pretrained_dict, strict=False)
         del state_dict
 
-    def forward(self, region_features, position_features,
+    # def forward(self, region_features, position_features,
+    #             masked_token_ids, token_type_ids, position_ids,
+    #             attention_mask):
+    #     embeddings = self.embedding_layer(
+    #         region_features, position_features,
+    #         masked_token_ids, token_type_ids, position_ids)
+    #
+    #     attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
+    #     attention_mask = (1.0 - attention_mask) * -10000.0
+    #
+    #     hidden_states = self.encoder(embeddings, attention_mask, self.head_mask)[0]
+    #     return self.classifier(hidden_states)
+
+    def forward(self, region_features,
                 masked_token_ids, token_type_ids, position_ids,
                 attention_mask):
         embeddings = self.embedding_layer(
-            region_features, position_features,
+            region_features,
             masked_token_ids, token_type_ids, position_ids)
 
         attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
@@ -64,6 +101,7 @@ class Generator(modeling_bert.BertPreTrainedModel):
 
         hidden_states = self.encoder(embeddings, attention_mask, self.head_mask)[0]
         return self.classifier(hidden_states)
+
 
 
 class LabelSmoothingLoss(nn.Module):

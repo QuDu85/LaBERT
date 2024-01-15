@@ -3,6 +3,9 @@ import os.path as osp
 import random
 from collections import namedtuple
 
+import warnings
+import numpy as np
+
 import h5py
 import torch
 from torch.nn.utils.rnn import pad_sequence
@@ -15,10 +18,11 @@ Sample = namedtuple("Sample", ["caption", "image_id"])
 
 class COCOCaptionDataset(Dataset):
 
-    def __init__(self, root, split, boundaries):
+    def __init__(self, root, split, boundaries, max_dictions=50):
         self.split = split
         self.root = root
         self.boundaries = boundaries
+        self.max_dictions = max_dictions
 
         if self.split == 'test':
             self.load_fn = self._get_item_infer
@@ -28,7 +32,7 @@ class COCOCaptionDataset(Dataset):
             self.build_train_samples()
 
     def build_infer_samples(self):
-        with open(osp.join(self.root, 'dataset_coco.json')) as f:
+        with open(osp.join(self.root, 'annotations\\dataset_coco.json')) as f:
             captions = json.load(f)
             captions = captions['images']
 
@@ -58,7 +62,7 @@ class COCOCaptionDataset(Dataset):
         self.samples = samples
 
     def build_train_samples(self):
-        with open(osp.join(self.root, 'dataset_coco.json')) as f:
+        with open(osp.join(self.root, 'annotations\\dataset_coco.json')) as f:
             captions = json.load(f)
             captions = captions['images']
 
@@ -82,13 +86,32 @@ class COCOCaptionDataset(Dataset):
         self.samples = samples
 
     def get_region_feature(self, name):
-        with h5py.File(osp.join(self.root, f'feat{name[-3:]}.h5'), 'r') as features, \
-                h5py.File(osp.join(self.root, f'cls{name[-3:]}.h5'), 'r') as classes, \
-                h5py.File(osp.join(self.root, f'region_bbox.h5'), 'r') as bboxes:
-            region_feature = torch.from_numpy(features[name][:])
-            region_class = torch.from_numpy(classes[name][:])
-            region_spatial = torch.from_numpy(bboxes[name][:])
-        return region_feature, region_class, region_spatial
+        # with h5py.File(osp.join(self.root, f'feat{name[-3:]}.h5'), 'r') as features, \
+        #         h5py.File(osp.join(self.root, f'cls{name[-3:]}.h5'), 'r') as classes, \
+        #         h5py.File(osp.join(self.root, f'region_bbox.h5'), 'r') as bboxes:
+        #     region_feature = torch.from_numpy(features[name][:])
+        #     region_class = torch.from_numpy(classes[name][:])
+        #     region_spatial = torch.from_numpy(bboxes[name][:])
+        # return region_feature, region_class, region_spatial
+
+        image_id = int(name.split('_')[-1].split('.')[0])
+        # print(image_id)
+        try:
+            f = h5py.File(osp.join(self.root, f'coco_detections.hdf5'), 'r')
+            # features, boxes, cls_prob
+            precomp_data = f['%d_features' % image_id][()]
+        except KeyError:
+            warnings.warn('Could not find detections for %d' % image_id)
+            precomp_data = np.random.rand(10, 2048)
+
+        delta = self.max_dictions - precomp_data.shape[0]
+        if delta > 0:
+            precomp_data = np.concatenate([precomp_data, np.zeros((delta, precomp_data.shape[1]))], axis=0)
+        elif delta < 0:
+            precomp_data = precomp_data[:self.max_dictions]
+
+        region_features = torch.from_numpy(precomp_data.astype(np.float32))
+        return region_features
 
     def __getitem__(self, index):
         return self.load_fn(index)
@@ -120,18 +143,26 @@ class COCOCaptionDataset(Dataset):
         input_token_id = torch.tensor(input_token_id, dtype=torch.long)
         masked_token_id = torch.tensor(masked_token_id, dtype=torch.long)
 
-        region_feature, region_class, region_spatial = \
-            self.get_region_feature(sample.image_id)
+        # region_feature, region_class, region_spatial = \
+        #     self.get_region_feature(sample.image_id)
 
-        return token_type_id, input_token_id, masked_token_id, \
-               region_feature, region_class, region_spatial
+        # return token_type_id, input_token_id, masked_token_id, \
+        #        region_feature, region_class, region_spatial
+
+        region_feature = self.get_region_feature(sample.image_id)
+
+        return token_type_id, input_token_id, masked_token_id, region_feature
 
     def _get_item_infer(self, index):
         sample = self.samples[index]
-        region_feature, region_class, region_spatial = \
-            self.get_region_feature(sample)
+        # region_feature, region_class, region_spatial = \
+        #     self.get_region_feature(sample)
+        region_feature = self.get_region_feature(sample)
+
         image_id = torch.tensor(int(sample[-12:]), dtype=torch.long)
-        return region_feature, region_class, region_spatial, image_id
+        # return region_feature, region_class, region_spatial, image_id
+
+        return region_feature, image_id
 
     def __len__(self):
         return len(self.samples)
@@ -145,8 +176,10 @@ def collate_fn_train(batch):
     masked_token_id = pad_sequence(batch[2], batch_first=True, padding_value=PAD)
 
     region_feature = torch.stack(batch[3], dim=0)
-    region_class = torch.stack(batch[4], dim=0)
-    region_spatial = torch.stack(batch[5], dim=0)
+    # region_class = torch.stack(batch[4], dim=0)
+    # region_spatial = torch.stack(batch[5], dim=0)
 
-    return token_type_id, input_token_id, masked_token_id, \
-           region_feature, region_class, region_spatial
+    # return token_type_id, input_token_id, masked_token_id, \
+    #        region_feature, region_class, region_spatial
+
+    return token_type_id, input_token_id, masked_token_id, region_feature

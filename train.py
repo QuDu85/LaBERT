@@ -1,14 +1,15 @@
 import argparse
 import logging
 import os
+import sys
 import time
 
 import torch
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
 from torch.nn.utils import clip_grad_norm_
-from transformers.modeling_bert import BertConfig
-from transformers.optimization import AdamW, WarmupCosineSchedule
+from transformers.models.bert.modeling_bert import BertConfig
+from transformers.optimization import AdamW, get_cosine_schedule_with_warmup
 
 from config import _C as config
 from dataset import COCOCaptionDataset, collate_fn_train
@@ -18,7 +19,7 @@ from utils.checkpointer import Checkpointer
 from utils.dataloader import make_data_loader
 from utils.logger import setup_logger
 from utils.tokenizer import EOS, MASK, PAD, num_tokens
-
+import os
 
 def train(generator, optimizer, data_loader, scheduler, checkpointer,
           device, log_time, checkpoint_time, arguments):
@@ -47,21 +48,30 @@ def train(generator, optimizer, data_loader, scheduler, checkpointer,
         input_token_ids = batch[1].to(device)  # (N, L), long
         masked_token_ids = batch[2].to(device)  # (N, L), long
         region_features = batch[3].to(device)  # (N, 100, 2048), float
-        region_class = batch[4].to(device)  # (N, 100, 1601), float
-        region_spatial = batch[5].to(device)  # (N, 100, 6), float
 
-        num_img_tokens = region_spatial.size(1)
+        #location embeddings
+        # region_class = batch[4].to(device)  # (N, 100, 1601), float
+        # region_spatial = batch[5].to(device)  # (N, 100, 6), float
+
+        # num_img_tokens = region_spatial.size(1)
+        num_img_tokens = region_features.size(1)
+
         seq_length = input_token_ids.size(1)
         batch_size = input_token_ids.size(0)
 
-        region_spatial[:, :, [0, 2]] /= region_spatial[:, :, [2]] + 1e-5
-        region_spatial[:, :, [1, 3]] /= region_spatial[:, :, [3]] + 1e-5
-        rel_area = (region_spatial[:, :, [3]] - region_spatial[:, :, [1]]) * \
-                   (region_spatial[:, :, [2]] - region_spatial[:, :, [0]])
-        region_spatial = torch.cat((region_spatial[:, :, :4],
-            rel_area.clamp_(0), region_spatial[:, :, 5:]), dim=-1)
-        position_features = torch.cat((F.layer_norm(region_spatial, [6]),
-            F.layer_norm(region_class, [1601])), dim=-1)
+        # location embeddings
+        # region_spatial[:, :, [0, 2]] /= region_spatial[:, :, [2]] + 1e-5
+        # region_spatial[:, :, [1, 3]] /= region_spatial[:, :, [3]] + 1e-5
+        # rel_area = (region_spatial[:, :, [3]] - region_spatial[:, :, [1]]) * \
+        #            (region_spatial[:, :, [2]] - region_spatial[:, :, [0]])
+        # region_spatial = torch.cat((region_spatial[:, :, :4],
+        #     rel_area.clamp_(0), region_spatial[:, :, 5:]), dim=-1)
+        # position_features = torch.cat((F.layer_norm(region_spatial, [6]),
+        #     F.layer_norm(region_class, [1601])), dim=-1)
+
+        # Create blank location embeddings for differentiation
+        # null_location_embeddings = torch.zeros((num_img_tokens, 1607), dtype=torch.float32,
+        #                                        device=torch.device(config.device))
 
         position_ids = torch.arange(seq_length, dtype=torch.long, device=device)
         position_ids = position_ids.unsqueeze(0).expand_as(input_token_ids)
@@ -77,8 +87,18 @@ def train(generator, optimizer, data_loader, scheduler, checkpointer,
         mask_position = (masked_token_ids == MASK).to(torch.long).view(-1)
         mask_position = mask_position.nonzero().squeeze()
 
+        # pred_scores = generator(
+        #     region_features, position_features,
+        #     masked_token_ids, token_type_ids,
+        #     position_ids, attention_mask)
+
+        # pred_scores = generator(
+        #         region_features, null_location_embeddings,
+        #         masked_token_ids, token_type_ids,
+        #         position_ids, attention_mask)
+
         pred_scores = generator(
-            region_features, position_features,
+            region_features,
             masked_token_ids, token_type_ids,
             position_ids, attention_mask)
 
@@ -112,6 +132,8 @@ def train(generator, optimizer, data_loader, scheduler, checkpointer,
 
 
 if __name__ == "__main__":
+    print('Started')
+
     parser = argparse.ArgumentParser(description="train")
     parser.add_argument("--local_rank", type=int, default=0)
     parser.add_argument("opts", default=None, nargs=argparse.REMAINDER)
@@ -119,7 +141,7 @@ if __name__ == "__main__":
 
     if config.distributed:
         torch.cuda.set_device(args.local_rank)
-        torch.distributed.init_process_group("nccl", init_method="env://")
+        torch.distributed.init_process_group("gloo", init_method="env://")
         synchronize()
 
     config.merge_from_list(args.opts)
@@ -144,10 +166,10 @@ if __name__ == "__main__":
         betas=config.solver.betas
     )
 
-    scheduler = WarmupCosineSchedule(
+    scheduler = get_cosine_schedule_with_warmup(
         optimizer=optimizer,
-        warmup_steps=config.scheduler.warmup_steps,
-        t_total=config.scheduler.max_steps
+        num_warmup_steps =config.scheduler.warmup_steps,
+        num_training_steps =config.scheduler.max_steps
     )
 
     checkpointer = Checkpointer(
@@ -162,7 +184,7 @@ if __name__ == "__main__":
     if config.model_path == '':
         generator.load_weights(config.pretrained_bert)
     else:
-        extra_checkpoint_data = checkpointer.load(config.model_path)
+        extra_checkpoint_data = checkpointer.load(config.model_path, model_only=False)
         arguments.update(extra_checkpoint_data)
 
     dataset = COCOCaptionDataset(

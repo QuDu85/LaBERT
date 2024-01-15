@@ -8,7 +8,7 @@ import time
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
-from transformers.modeling_bert import BertConfig
+from transformers.models.bert.modeling_bert import BertConfig
 
 from config import _C as config
 from dataset import COCOCaptionDataset
@@ -30,7 +30,7 @@ def inference(generator, data_loader, device):
     for l, (low, high) in enumerate(config.boundaries):
         pred_dict[str(l + 1)] = dict()
 
-        eos_penalizer = torch.ones((1, high - low + 1), dtype=torch.float, device=device)
+        eos_penalizer = torch.ones((1, high - low + 2), dtype=torch.float, device=device)
         eos_penalizer *= config.infer.eos_decay[l]
         eos_penalizer = eos_penalizer.cumprod(dim=-1).flip(-1)
         eos_penalizers.append(eos_penalizer)
@@ -40,28 +40,32 @@ def inference(generator, data_loader, device):
         iteration = iteration + 1
 
         region_features = batch[0].to(device)  # (N, 100, 2048), float
-        region_class = batch[1].to(device)  # (N, 100, 1601), float
-        region_spatial = batch[2].to(device)  # (N, 100, 6), float
+        # region_class = batch[1].to(device)  # (N, 100, 1601), float
+        # region_spatial = batch[2].to(device)  # (N, 100, 6), float
 
-        B = region_class.size(0)
-        num_regions = region_class.size(1)
+        B = region_features.size(0)
+        num_regions = region_features.size(1)
         pred_list = list()
+
+        # Dummy class and spatial
+        region_class = torch.ones((B, num_regions, 1601), dtype=torch.float32, device=device)
+        region_spatial = torch.ones((B, num_regions, 6), dtype=torch.float32, device=device)
 
         with torch.no_grad():
             batch_id = torch.arange(0, B, 1, device=device).unsqueeze(1)
-            region_spatial[:, :, [0, 2]] /= region_spatial[:, :, [2]] + 1e-5
-            region_spatial[:, :, [1, 3]] /= region_spatial[:, :, [3]] + 1e-5
+            # region_spatial[:, :, [0, 2]] /= region_spatial[:, :, [2]] + 1e-5
+            # region_spatial[:, :, [1, 3]] /= region_spatial[:, :, [3]] + 1e-5
             rel_area = (region_spatial[:, :, [3]] - region_spatial[:, :, [1]]) * \
                        (region_spatial[:, :, [2]] - region_spatial[:, :, [0]])
-            region_spatial = torch.cat((region_spatial[:, :, :4],
-                rel_area.clamp_(0), region_spatial[:, :, 5:]), dim=-1)
-            position_features = torch.cat((F.layer_norm(region_spatial, [6]),
-                F.layer_norm(region_class, [1601])), dim=-1)
+            # region_spatial = torch.cat((region_spatial[:, :, :4],
+            #     rel_area.clamp_(0), region_spatial[:, :, 5:]), dim=-1)
+            # position_features = torch.cat((F.layer_norm(region_spatial, [6]),
+            #     F.layer_norm(region_class, [1601])), dim=-1)
             region_type = torch.full((B, num_regions), len(config.boundaries) + 1)
             region_type = region_type.to(torch.long).to(device)
 
             for l, (low, high) in enumerate(config.boundaries, 1):
-
+                high = high+1
                 token_type_ids = region_class.new_full((B, high), l, dtype=torch.long)
                 masked_token_ids = token_type_ids.new_full((B, high), MASK)
                 attention_mask = rel_area.new_ones((B, high + num_regions))
@@ -70,7 +74,7 @@ def inference(generator, data_loader, device):
                 token_type_ids = torch.cat((region_type, token_type_ids), dim=1)
 
                 pred_scores = generator(
-                    region_features, position_features,
+                    region_features,
                     masked_token_ids, token_type_ids,
                     position_ids, attention_mask)
 
@@ -87,7 +91,7 @@ def inference(generator, data_loader, device):
 
                     pred_token_ids.view(-1)[mask_id] = MASK
                     pred_scores = generator(
-                        region_features, position_features,
+                        region_features,
                         pred_token_ids, token_type_ids,
                         position_ids, attention_mask)
 
@@ -102,7 +106,7 @@ def inference(generator, data_loader, device):
 
                 pred_list.append(pred_token_ids.cpu().numpy())  # 5 * (N, L)
 
-        image_ids = list(batch[3].cpu().numpy())
+        image_ids = list(batch[1].cpu().numpy())
         # print(image_ids[0])
         for level, preds_per_level in enumerate(pred_list, 1):
             for batch_id, image_id in enumerate(image_ids):
